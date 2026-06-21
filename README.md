@@ -53,3 +53,8 @@ Part of the FallSeed family — see [www.ai-nativesolutions.com](https://www.ai-
 ## Licence
 
 MIT © Simon Gant.
+
+
+## What kind of seed is this?
+
+A **level-0** seed in the FallSeed family. Built on the Fork Seed primitive — see [the spec](https://www.ai-nativesolutions.com/spec.html) for the four invariants of replication, the SEED schema, and the six-step fork protocol that every conforming seed implements.

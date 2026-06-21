@@ -147,6 +147,8 @@ main{padding:24px 32px 80px;overflow-y:auto;max-width:1200px;margin:0 auto;width
 const SEED_DEFAULT = {
  manifest: {
  name: 'vet-firm', vertical: 'Veterinary practice · RCVS', version: '2.0.0', prime: 1171,
+    level: 0,
+    parent: "fallseed-hr",
  primeWindow: [947, 953, 967, 971],
  bundleRoles: ['anchor', 'onboard', 'paper', 'practice'],
  meshChannel: 'fall-vet',
@@ -358,11 +360,71 @@ async function persistProviderConfig() { await idbPut('config', state.providerCo
 async function persistRateLimits() { await idbPut('config', state.rateLimits, 'rateLimits'); }
 async function persistUsage() { await idbPut('config', state.usage, 'usage'); }
 
+// ═══════════════════════════════════════════════════════════════
+// MESH · upgraded · peer tracker on fall-signal · 2026-06-21
+// ═══════════════════════════════════════════════════════════════
+window.__fellowSeeds = window.__fellowSeeds || new Map();
+let __sigChan = null, __meshChan2 = null, __pingTimer = null;
+
+function __seedSelfInfo() {
+  try {
+    return {
+      source: 'fallseed-' + (SEED.manifest.name || 'unknown'),
+      name: SEED.manifest.name || 'unknown',
+      prime: SEED.manifest.prime,
+      version: SEED.manifest.version,
+      level: SEED.manifest.level !== undefined ? SEED.manifest.level : null,
+      parent: SEED.manifest.parent || null,
+      mesh: SEED.manifest.meshChannel,
+      ts: Date.now()
+    };
+  } catch (e) { return { source: 'fallseed-unknown', ts: Date.now() }; }
+}
+
+function __pruneFellowSeeds(maxAgeMs) {
+  const cutoff = Date.now() - (maxAgeMs || 90000);
+  for (const [k, v] of window.__fellowSeeds.entries()) {
+    if (v.lastSeen < cutoff) window.__fellowSeeds.delete(k);
+  }
+}
+
 function initMesh() {
- try {
- const sig = new BroadcastChannel('fall-signal');
- sig.postMessage({ source: 'fallseed-vet-v2', type: 'hello', prime: SEED.manifest.prime, version: SEED.manifest.version, ts: now() });
- } catch (e) {}
+  try {
+    __sigChan = new BroadcastChannel('fall-signal');
+    // Announce self
+    __sigChan.postMessage({ type: 'hello', ...__seedSelfInfo() });
+    // Listen for hellos + pings + replies
+    __sigChan.onmessage = e => {
+      const m = e.data || {};
+      if (!m.type) return;
+      if (m.type === 'hello' || m.type === 'pong') {
+        if (!m.source || m.source === __seedSelfInfo().source) return;
+        const existing = window.__fellowSeeds.get(m.source) || {};
+        window.__fellowSeeds.set(m.source, { ...existing, ...m, lastSeen: Date.now() });
+        // Trigger a re-render of inspect if visible
+        if (typeof state !== 'undefined' && state.active === 'inspect') {
+          if (typeof render === 'function') try { render(); } catch (e) {}
+        }
+      } else if (m.type === 'ping') {
+        // Reply with our own info so the pinger can discover us
+        try { __sigChan.postMessage({ type: 'pong', ...__seedSelfInfo() }); } catch (e) {}
+      }
+    };
+    // Periodic ping to refresh peer list (every 30s)
+    __pingTimer = setInterval(() => {
+      try {
+        __sigChan.postMessage({ type: 'ping', ...__seedSelfInfo() });
+        __pruneFellowSeeds(90000);
+      } catch (e) {}
+    }, 30000);
+    // Also try a vertical mesh channel if SEED defines one
+    try {
+      const mc = SEED.manifest.meshChannel;
+      if (mc && mc !== 'fall-signal') {
+        __meshChan2 = new BroadcastChannel(mc);
+      }
+    } catch (e) {}
+  } catch (e) { /* mesh optional */ }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -647,7 +709,18 @@ function renderWelcome(v) {
 
  <div class="section-h"><h2>This session</h2></div>
  <div class="inspect-grid">
- <div class="inspect-card"><div class="num">${totalCalls}</div><div class="lbl">Total cascade calls</div></div>
+ <div class="inspect-card"><div class="num">${totalCalls}</div>
+    <div class="card" style="margin-top:18px">
+      <h3>About this seed</h3>
+      <p style="font-size:12px;color:var(--cream-dim);margin-bottom:8px">Level-0 vertical seed in the FallSeed family. Forked from <code style="color:var(--brass)">fallseed-hr</code>.</p>
+      <p style="font-size:12px;color:var(--cream-dim);margin-bottom:8px">Implements the Fork Seed primitive — read the <a href="https://www.ai-nativesolutions.com/spec.html" target="_blank" rel="noopener" style="color:var(--brass)">public spec</a> for the four invariants of replication, the SEED schema, and the six-step fork protocol that every conforming seed implements.</p>
+      <p style="font-size:11px;color:var(--cream-muted);font-family:var(--mono);letter-spacing:.06em">level <span style="color:var(--brass)">0</span> · parent <span style="color:var(--brass)">fallseed-hr</span> · MIT</p>
+    </div>
+    <div class="card" style="margin-top:18px">
+      <h3>Fellow seeds online</h3>
+      <p style="font-size:12px;color:var(--cream-dim);margin-bottom:10px">Other FallSeeds reachable on this origin via the <code style="color:var(--brass)">fall-signal</code> mesh. Updates every 30 seconds.</p>
+      <div id="fellowSeedsList" style="font-family:var(--mono);font-size:11px;color:var(--cream-dim)">${(function(){const peers=Array.from(window.__fellowSeeds?.values?.()||[]); if(!peers.length) return '<div style="color:var(--cream-muted)">none detected · open another FallSeed on this domain to see it appear here</div>'; return peers.sort((a,b)=>(a.name||'').localeCompare(b.name||'')).map(p=>`<div style="padding:6px 0;border-bottom:1px solid var(--line-soft)"><span style="color:var(--brass)">${esc(p.source||'?')}</span> · prime <span style="color:var(--brass)">${esc(String(p.prime||'?'))}</span> · v${esc(String(p.version||'?'))} · level ${esc(String(p.level??'?'))}${p.parent?' · forked from '+esc(p.parent):''} · last seen ${Math.round((Date.now()-(p.lastSeen||0))/1000)}s ago</div>`).join('');})()}</div>
+    </div><div class="lbl">Total cascade calls</div></div>
  <div class="inspect-card"><div class="num">${totalTokens.toLocaleString()}</div><div class="lbl">Total tokens</div></div>
  <div class="inspect-card"><div class="num">${state.generated.length}</div><div class="lbl">Tools generated</div></div>
  <div class="inspect-card"><div class="num">${state.autoDetected.length}</div><div class="lbl">Auto-detected local LLMs</div></div>
