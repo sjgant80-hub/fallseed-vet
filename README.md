@@ -31,7 +31,7 @@ Veterinary practice · RCVS (UK).
 - **One HTML file** — no build step, no server, no install
 - **IDB primary** — every record lives in `IndexedDB` (`fallseed-vet-v2`) on your device
 - **BroadcastChannel mesh** — `fall-vet` for cross-tool sync; `fall-signal` for global hello
-- **Mansoor P3 audit chain** — `prevHash` + SHA-256 chained entries on every mutation
+- **P3 audit chain** — `prevHash` + SHA-256 chained entries on every mutation
 - **8-provider LLM cascade** — WebLLM (T1) → ollama / LM Studio (T2) → Groq / OpenRouter free / Google / Cerebras (T3-free) → Anthropic (T3-paid)
 - **Streaming** — SSE token-by-token output
 - **Fork Seed packager** — serialises a mutated SEED back into a new self-contained HTML
