@@ -340,6 +340,7 @@ function idbGetAll(s) { return new Promise(r => { const tx = db.transaction(s,'r
 function idbPut(s, v, k) { return new Promise(r => { const tx = db.transaction(s,'readwrite'); const o = tx.objectStore(s); const q = k != null ? o.put(v, k) : o.put(v); q.onsuccess = () => r(true); }); }
 
 async function loadAll() {
+  await __loadStoredFlavour && __loadStoredFlavour();
  if (!db) await openDB();
  state.firm = await idbGet('config', 'firm');
  state.providerConfig = await idbGet('config', 'providerConfig') || {};
@@ -424,8 +425,121 @@ function initMesh() {
         __meshChan2 = new BroadcastChannel(mc);
       }
     } catch (e) {}
+    try { __wireCrossSeed(); } catch(_e){}
   } catch (e) { /* mesh optional */ }
 }
+// ─── Cross-seed mesh protocol (request/response) · 2026-06-21 ───
+window.__crossSeedHandlers = window.__crossSeedHandlers || {};
+window.__crossSeedPending  = window.__crossSeedPending  || new Map();
+
+// Default introspect handler — every seed can describe itself
+window.__crossSeedHandlers['introspect'] = async function() {
+  return {
+    manifest: SEED.manifest,
+    peerCount: window.__fellowSeeds?.size || 0,
+    ts: Date.now()
+  };
+};
+
+// Default records-export handler — list all entries from named IDB stores
+window.__crossSeedHandlers['records-export'] = async function(payload) {
+  const stores = (payload?.stores || []).filter(s => typeof s === 'string');
+  const out = {};
+  for (const s of stores) {
+    try { out[s] = await idbGetAll(s); } catch(e) { out[s] = { error: e.message }; }
+  }
+  return { records: out, manifest: SEED.manifest, ts: Date.now() };
+};
+
+// Intercept fall-signal messages for request/response routing
+// (extends __sigChan listener set up by initMesh)
+function __wireCrossSeed() {
+  if (!__sigChan) return;
+  const origOnMsg = __sigChan.onmessage;
+  __sigChan.onmessage = async (e) => {
+    if (origOnMsg) try { origOnMsg(e); } catch(err) {}
+    const m = e.data || {};
+    if (!m.type) return;
+    const self = __seedSelfInfo().source;
+    if (m.type === 'request' && (m.to === self || m.to === '*') && m.from !== self) {
+      const handler = window.__crossSeedHandlers[m.kind];
+      if (!handler) return;
+      try {
+        const result = await handler(m.payload || {});
+        __sigChan.postMessage({ type:'response', kind:m.kind, from:self, to:m.from, payload:result, reqId:m.reqId });
+      } catch (err) {
+        __sigChan.postMessage({ type:'response', kind:m.kind, from:self, to:m.from, payload:{ error: err.message }, reqId:m.reqId });
+      }
+    } else if (m.type === 'response' && m.to === self) {
+      const pending = window.__crossSeedPending.get(m.reqId);
+      if (pending) {
+        clearTimeout(pending.timer);
+        pending.resolve(m.payload);
+        window.__crossSeedPending.delete(m.reqId);
+      }
+    }
+  };
+}
+
+// Send a request to a specific peer (or all '*') and await response(s)
+async function crossSeedRequest(targetSource, kind, payload, opts) {
+  opts = opts || {};
+  const timeoutMs = opts.timeoutMs || 3000;
+  const reqId = 'r_' + Math.random().toString(36).slice(2,12);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      window.__crossSeedPending.delete(reqId);
+      reject(new Error('timeout'));
+    }, timeoutMs);
+    window.__crossSeedPending.set(reqId, { resolve, reject, timer });
+    try {
+      __sigChan.postMessage({
+        type:'request', kind, from:__seedSelfInfo().source,
+        to:targetSource, payload, reqId
+      });
+    } catch (e) {
+      clearTimeout(timer);
+      window.__crossSeedPending.delete(reqId);
+      reject(e);
+    }
+  });
+}
+window.crossSeedRequest = crossSeedRequest;
+
+// ─── Flavour pull from fallrecall (2026-06-21) ──────────
+window.__flavourProfile = null;
+window.__flavourLoadedAt = null;
+async function pullFlavourFromRecall() {
+  try {
+    if (typeof crossSeedRequest !== 'function') { toast('mesh not ready · refresh + try again', true); return; }
+    toast('asking fallrecall for your flavour…');
+    const resp = await crossSeedRequest('fallrecall', 'flavour-summary', {}, { timeoutMs: 4000 });
+    if (!resp) { toast('no reply from fallrecall', true); return; }
+    if (!resp.available) { toast('fallrecall has no profile yet · analyse some conversations there first', true); return; }
+    window.__flavourProfile = resp.profile;
+    window.__flavourShortPrompt = resp.shortPrompt || null;
+    window.__flavourLoadedAt = Date.now();
+    try { await idbPut('config', { profile: resp.profile, shortPrompt: resp.shortPrompt, loadedAt: window.__flavourLoadedAt }, 'flavour'); } catch(e) {}
+    toast('✓ flavour pulled · ' + (resp.profile?.voiceNotes?.length||0) + ' voice notes loaded');
+    if (typeof render === 'function') render();
+  } catch (e) {
+    if (e.message === 'timeout') toast('fallrecall not detected on this origin · open it in another tab first', true);
+    else toast('pull failed: ' + e.message, true);
+  }
+}
+async function __loadStoredFlavour() {
+  try {
+    const stored = await idbGet('config', 'flavour');
+    if (stored) {
+      window.__flavourProfile = stored.profile;
+      window.__flavourShortPrompt = stored.shortPrompt;
+      window.__flavourLoadedAt = stored.loadedAt;
+    }
+  } catch(e) {}
+}
+window.pullFlavourFromRecall = pullFlavourFromRecall;
+
+
 
 // ═══════════════════════════════════════════════════════════════
 // V2 · AUTO-DETECT LOCAL RUNNERS ON BOOT
@@ -720,6 +834,15 @@ function renderWelcome(v) {
       <h3>Fellow seeds online</h3>
       <p style="font-size:12px;color:var(--cream-dim);margin-bottom:10px">Other FallSeeds reachable on this origin via the <code style="color:var(--brass)">fall-signal</code> mesh. Updates every 30 seconds.</p>
       <div id="fellowSeedsList" style="font-family:var(--mono);font-size:11px;color:var(--cream-dim)">${(function(){const peers=Array.from(window.__fellowSeeds?.values?.()||[]); if(!peers.length) return '<div style="color:var(--cream-muted)">none detected · open another FallSeed on this domain to see it appear here</div>'; return peers.sort((a,b)=>(a.name||'').localeCompare(b.name||'')).map(p=>`<div style="padding:6px 0;border-bottom:1px solid var(--line-soft)"><span style="color:var(--brass)">${esc(p.source||'?')}</span> · prime <span style="color:var(--brass)">${esc(String(p.prime||'?'))}</span> · v${esc(String(p.version||'?'))} · level ${esc(String(p.level??'?'))}${p.parent?' · forked from '+esc(p.parent):''} · last seen ${Math.round((Date.now()-(p.lastSeen||0))/1000)}s ago</div>`).join('');})()}</div>
+    </div>
+    <div class="card" style="margin-top:18px">
+      <h3>Flavour from fallrecall</h3>
+      <p style="font-size:12px;color:var(--cream-dim);margin-bottom:10px">Pull your analysed flavour profile (voice, interests, preferences, anti-prefs) from <a href="https://sjgant80-hub.github.io/fallrecall/" target="_blank" rel="noopener" style="color:var(--brass)">fallrecall</a>. If fallrecall is open on this origin, the pull happens instantly via the cross-seed mesh.</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+        <button class="btn brass sm" onclick="pullFlavourFromRecall()">⌬ pull flavour →</button>
+        <a href="https://sjgant80-hub.github.io/fallrecall/" target="_blank" rel="noopener" class="btn sm ghost">open fallrecall ↗</a>
+      </div>
+      <div id="flavourStatus" style="font-family:var(--mono);font-size:11px;color:var(--cream-muted);letter-spacing:.04em">${(function(){if(!window.__flavourProfile)return '<span style="color:var(--cream-muted)">no profile loaded · click pull above (fallrecall must be open in another tab)</span>'; const p=window.__flavourProfile; return '<span style=\"color:var(--green)\">✓ loaded ' + new Date(window.__flavourLoadedAt).toLocaleString() + '</span><br>' + (p.voiceNotes?.length||0) + ' voice notes · ' + (p.recurringInterests?.length||0) + ' interests · ' + (p.preferences?.length||0) + ' preferences · ' + (p.antiPreferences?.length||0) + ' anti-prefs';})()}</div>
     </div><div class="lbl">Total cascade calls</div></div>
  <div class="inspect-card"><div class="num">${totalTokens.toLocaleString()}</div><div class="lbl">Total tokens</div></div>
  <div class="inspect-card"><div class="num">${state.generated.length}</div><div class="lbl">Tools generated</div></div>
