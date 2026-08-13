@@ -1,0 +1,8 @@
+[
+  {
+    "line": 159,
+    "mutation": "< → <=",
+    "snippet": "for (; i < src.length; i++) {",
+    "reason": "Equivalent, not unguarded. This is the scan loop in findSeedLiteral. Running one extra iteration reads src[src.length], which is undefined: it matches none of the branch tests (it is not a quote, not a brace, not a slash or star, and the in-string and in-comment branches only continue), so the loop body does nothing and then exits on the next check. The only way the extra step could matter is if a closing brace were found at that index, and there is no character at that index to be one. The walker's actual behaviour at the end of input — returning null rather than guessing when the object never closes — is asserted directly in section 6."
+  }
+]
